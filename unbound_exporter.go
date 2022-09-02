@@ -537,10 +537,54 @@ func (e *UnboundExporter) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func (e *UnboundExporter) getStatus() (string, error) {
+	var (
+		conn net.Conn
+		err  error
+	)
+
+	if e.socketFamily == "unix" || e.tlsConfig == nil {
+		conn, err = net.Dial(e.socketFamily, e.host)
+	} else {
+		conn, err = tls.Dial(e.socketFamily, e.host, e.tlsConfig)
+	}
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	_, err = conn.Write([]byte("UBCT1 status\n"))
+	if err != nil {
+		return "", err
+	}
+
+	bytes, err := io.ReadAll(conn)
+	if err != nil {
+		return "", err
+	}
+
+	return string(bytes), nil
+}
+
+func (e *UnboundExporter) StatusHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status, err := e.getStatus()
+		if err != nil {
+			w.WriteHeader(500)
+			fmt.Fprintf(w, "Failed to get status: %v", err)
+			return
+		}
+
+		w.WriteHeader(200)
+		fmt.Fprintf(w, "%s", status)
+	})
+}
+
 func main() {
 	var (
 		listenAddress = flag.String("web.listen-address", ":9167", "Address to listen on for web interface and telemetry.")
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+		healthzPath   = flag.String("web.healthcheck-path", "/healthz", "Path under which to expose server status.")
 		unboundHost   = flag.String("unbound.host", "tcp://localhost:8953", "Unix or TCP address of Unbound control socket.")
 		unboundCa     = flag.String("unbound.ca", "/etc/unbound/unbound_server.pem", "Unbound server certificate.")
 		unboundCert   = flag.String("unbound.cert", "/etc/unbound/unbound_control.pem", "Unbound client certificate.")
@@ -556,6 +600,7 @@ func main() {
 	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricsPath, promhttp.Handler())
+	http.Handle(*healthzPath, exporter.StatusHandler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`
 			<html>
